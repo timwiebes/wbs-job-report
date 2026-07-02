@@ -1,9 +1,14 @@
 """
 Headless client for Tabula (app.tabula-online.com).
 
-Confirmed endpoints (from prior WBS extension work):
-- GET  /users/sign_in                -> login page, contains authenticity_token
-- POST /users/sign_in                -> logs in, sets session cookie (Devise-style)
+Confirmed endpoints (from prior WBS extension work + live network capture):
+- GET  /login?next=%2F                -> login page, contains a csrf_token hidden field
+- POST /login?next=%2F                -> logs in, sets session cookie
+      Form fields (confirmed via DevTools): csrf_token, login (email address,
+      NOT "email"), password, submit="Log In", next="/". A "metrics" field
+      (JSON blob of screen/browser info) is also sent by the real browser but
+      appears to be telemetry, not required for auth - omitted here; add back
+      if login starts failing.
 - GET  /scheduling_data?tm_ajax_request=true&tm_request_time={ms}
       -> JSON array of jobs. Fields used: order_id, customer_name, products,
          area, end_date, is_history (True == "Returned")
@@ -32,37 +37,41 @@ class TabulaClient:
         self._login(email, password)
 
     def _login(self, email: str, password: str):
-        login_url = f"{self.base_url}/users/sign_in"
-        r = self.session.get(login_url, timeout=30)
+        login_url = f"{self.base_url}/login"
+        r = self.session.get(login_url, params={"next": "/"}, timeout=30)
         r.raise_for_status()
 
         token_match = re.search(
-            r'name="authenticity_token"\s+value="([^"]+)"', r.text
+            r'name="csrf_token"\s+value="([^"]+)"', r.text
         )
         if not token_match:
-            # Some Devise forms order attributes differently
             token_match = re.search(
-                r'value="([^"]+)"\s+name="authenticity_token"', r.text
+                r'value="([^"]+)"\s+name="csrf_token"', r.text
             )
         if not token_match:
             raise RuntimeError(
-                "Could not find authenticity_token on Tabula login page. "
+                "Could not find csrf_token on Tabula login page. "
                 "Login page markup may have changed."
             )
         token = token_match.group(1)
 
         payload = {
-            "authenticity_token": token,
-            "user[email]": email,
-            "user[password]": password,
-            "user[remember_me]": "1",
-            "commit": "Log in",
+            "csrf_token": token,
+            "next": "/",
+            "login": email,
+            "password": password,
+            "submit": "Log In",
         }
-        r2 = self.session.post(login_url, data=payload, timeout=30, allow_redirects=True)
+        r2 = self.session.post(
+            login_url, params={"next": "/"}, data=payload, timeout=30,
+            allow_redirects=True,
+        )
         r2.raise_for_status()
 
-        # Devise re-renders the login form (with an error) on failure.
-        if "user[password]" in r2.text and "sign_in" in r2.url:
+        # If login failed, Tabula re-renders the login form instead of
+        # redirecting through to the app - the password field will still
+        # be present on the page we land on.
+        if 'name="password"' in r2.text and "/login" in r2.url:
             raise RuntimeError(
                 "Tabula login appears to have failed - check TABULA_EMAIL / "
                 "TABULA_PASSWORD secrets."
