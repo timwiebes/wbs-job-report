@@ -57,6 +57,19 @@ def first_present(d: dict, keys: list, default=""):
     return default
 
 
+def to_text(value) -> str:
+    """Coerce whatever Tabula returns (str, list, dict, None) into text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " / ".join(to_text(v) for v in value if v not in (None, ""))
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return str(value)
+
+
 def extract_products(order_info: dict, area) -> list:
     """Returns list of {name, rate_per_ha, total}."""
     raw = order_info.get("order_products_json")
@@ -74,7 +87,7 @@ def extract_products(order_info: dict, area) -> list:
         area_f = None
 
     for p in raw:
-        name = p.get("product_label", "") or p.get("name", "")
+        name = to_text(p.get("product_label", "") or p.get("name", ""))
         rate = p.get("rate", p.get("label_rate", ""))
         total = p.get("total")
         if total is None and area_f is not None:
@@ -82,30 +95,34 @@ def extract_products(order_info: dict, area) -> list:
                 total = round(float(rate) * area_f, 2)
             except (TypeError, ValueError):
                 total = ""
-        products.append({"name": name, "rate": rate, "total": total})
+        products.append({"name": name, "rate": to_text(rate), "total": to_text(total)})
     return products
 
 
 def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
     merged = {**order_info}  # order_info takes priority for detail fields
-    notes = first_present(merged, KEY_CANDIDATES["notes"])
-    comments = first_present(merged, KEY_CANDIDATES["comments"])
+    notes = to_text(first_present(merged, KEY_CANDIDATES["notes"]))
+    comments = to_text(first_present(merged, KEY_CANDIDATES["comments"]))
     combined_notes = " | ".join(x for x in [notes, comments] if x)
 
-    area = first_present(merged, KEY_CANDIDATES["requested_area"])
+    area = to_text(first_present(merged, KEY_CANDIDATES["requested_area"]))
 
     return {
         "order_id": scheduling_entry.get("order_id") or merged.get("order_id"),
-        "orchard": first_present(scheduling_entry, KEY_CANDIDATES["orchard"])
-        or first_present(merged, KEY_CANDIDATES["orchard"]),
-        "kpin": first_present(merged, KEY_CANDIDATES["kpin"]),
+        "orchard": to_text(
+            first_present(scheduling_entry, KEY_CANDIDATES["orchard"])
+            or first_present(merged, KEY_CANDIDATES["orchard"])
+        ),
+        "kpin": to_text(first_present(merged, KEY_CANDIDATES["kpin"])),
         "notes": combined_notes,
         "requested_area": area,
-        "l_per_ha": first_present(merged, KEY_CANDIDATES["l_per_ha"]),
-        "litres": first_present(merged, KEY_CANDIDATES["litres"]),
-        "tjet_ha": first_present(merged, KEY_CANDIDATES["tjet_ha"]),
-        "date": first_present(scheduling_entry, KEY_CANDIDATES["date"])
-        or first_present(merged, KEY_CANDIDATES["date"]),
+        "l_per_ha": to_text(first_present(merged, KEY_CANDIDATES["l_per_ha"])),
+        "litres": to_text(first_present(merged, KEY_CANDIDATES["litres"])),
+        "tjet_ha": to_text(first_present(merged, KEY_CANDIDATES["tjet_ha"])),
+        "date": to_text(
+            first_present(scheduling_entry, KEY_CANDIDATES["date"])
+            or first_present(merged, KEY_CANDIDATES["date"])
+        ),
         "products": extract_products(merged, area),
     }
 
