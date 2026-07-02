@@ -49,6 +49,18 @@ KEY_CANDIDATES = {
     "date": ["end_date", "EndDate", "due_date", "DueDate"],
 }
 
+PRODUCT_UNIT_CANDIDATES = ["rate_unit", "unit", "uom", "measurement_unit", "product_unit"]
+
+
+def round_num(value, places=1) -> str:
+    """Round anything numeric-looking to `places` decimals; pass through otherwise."""
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{round(float(value), places):.{places}f}"
+    except (TypeError, ValueError):
+        return to_text(value)
+
 
 def first_present(d: dict, keys: list, default=""):
     for k in keys:
@@ -57,21 +69,8 @@ def first_present(d: dict, keys: list, default=""):
     return default
 
 
-def to_text(value) -> str:
-    """Coerce whatever Tabula returns (str, list, dict, None) into text."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return " / ".join(to_text(v) for v in value if v not in (None, ""))
-    if isinstance(value, dict):
-        return json.dumps(value)
-    return str(value)
-
-
 def extract_products(order_info: dict, area) -> list:
-    """Returns list of {name, rate_per_ha, total}."""
+    """Returns list of {name, rate, unit, total}."""
     raw = order_info.get("order_products_json")
     if isinstance(raw, str):
         try:
@@ -89,14 +88,33 @@ def extract_products(order_info: dict, area) -> list:
     for p in raw:
         name = to_text(p.get("product_label", "") or p.get("name", ""))
         rate = p.get("rate", p.get("label_rate", ""))
+        unit = to_text(first_present(p, PRODUCT_UNIT_CANDIDATES))
         total = p.get("total")
         if total is None and area_f is not None:
             try:
-                total = round(float(rate) * area_f, 2)
+                total = float(rate) * area_f
             except (TypeError, ValueError):
                 total = ""
-        products.append({"name": name, "rate": to_text(rate), "total": to_text(total)})
+        products.append({
+            "name": name,
+            "rate": round_num(rate),
+            "unit": unit,
+            "total": round_num(total),
+        })
     return products
+
+
+def to_text(value) -> str:
+    """Coerce whatever Tabula returns (str, list, dict, None) into text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " / ".join(to_text(v) for v in value if v not in (None, ""))
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return str(value)
 
 
 def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
@@ -105,7 +123,8 @@ def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
     comments = to_text(first_present(merged, KEY_CANDIDATES["comments"]))
     combined_notes = " | ".join(x for x in [notes, comments] if x)
 
-    area = to_text(first_present(merged, KEY_CANDIDATES["requested_area"]))
+    raw_area = first_present(merged, KEY_CANDIDATES["requested_area"])
+    area = round_num(raw_area)
 
     return {
         "order_id": scheduling_entry.get("order_id") or merged.get("order_id"),
@@ -116,14 +135,14 @@ def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
         "kpin": to_text(first_present(merged, KEY_CANDIDATES["kpin"])),
         "notes": combined_notes,
         "requested_area": area,
-        "l_per_ha": to_text(first_present(merged, KEY_CANDIDATES["l_per_ha"])),
-        "litres": to_text(first_present(merged, KEY_CANDIDATES["litres"])),
-        "tjet_ha": to_text(first_present(merged, KEY_CANDIDATES["tjet_ha"])),
+        "l_per_ha": round_num(first_present(merged, KEY_CANDIDATES["l_per_ha"])),
+        "litres": round_num(first_present(merged, KEY_CANDIDATES["litres"])),
+        "tjet_ha": round_num(first_present(merged, KEY_CANDIDATES["tjet_ha"])),
         "date": to_text(
             first_present(scheduling_entry, KEY_CANDIDATES["date"])
             or first_present(merged, KEY_CANDIDATES["date"])
         ),
-        "products": extract_products(merged, area),
+        "products": extract_products(merged, raw_area),
     }
 
 
@@ -142,9 +161,18 @@ def render_email(jobs: list) -> str:
     rows = []
     for j in jobs:
         product_lines = "".join(
-            f"<li>{p['name']} — {p['rate']} /ha, total {p['total']}</li>"
+            f"<li>{p['name']} — {p['rate']}{(' ' + p['unit']) if p['unit'] else ''}/ha, "
+            f"total {p['total']}{(' ' + p['unit']) if p['unit'] else ''}</li>"
             for p in j["products"]
         ) or "<li>(no products recorded)</li>"
+
+        try:
+            high_rate = float(j["l_per_ha"]) >= 1500
+        except (TypeError, ValueError):
+            high_rate = False
+        l_per_ha_style = (
+            "color:#c0392b;font-weight:bold;" if high_rate else ""
+        )
 
         rows.append(f"""
         <div style="margin-bottom:24px;padding:16px;border:1px solid #ddd;border-radius:6px;">
@@ -153,7 +181,7 @@ def render_email(jobs: list) -> str:
             <tr><td style="padding:2px 12px 2px 0;color:#555;">Date</td><td>{j['date']}</td></tr>
             <tr><td style="padding:2px 12px 2px 0;color:#555;">Notes</td><td>{j['notes'] or '-'}</td></tr>
             <tr><td style="padding:2px 12px 2px 0;color:#555;">Requested area</td><td>{j['requested_area']} ha</td></tr>
-            <tr><td style="padding:2px 12px 2px 0;color:#555;">L/ha</td><td>{j['l_per_ha']}</td></tr>
+            <tr><td style="padding:2px 12px 2px 0;color:#555;">L/ha</td><td style="{l_per_ha_style}">{j['l_per_ha']}</td></tr>
             <tr><td style="padding:2px 12px 2px 0;color:#555;">Litres used</td><td>{j['litres']}</td></tr>
             <tr><td style="padding:2px 12px 2px 0;color:#555;">TJET ha</td><td>{j['tjet_ha']}</td></tr>
           </table>
