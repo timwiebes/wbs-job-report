@@ -10,7 +10,6 @@ Two modes, selected by env var:
   DEBUG_ORDER_ID=<id>   -> just fetch and print the raw order_infos JSON for
                             that one order (pretty-printed, all keys visible)
                             to the Actions log. No email sent, no state written.
-                            Use this once to confirm field names, then unset it.
 
   (default)             -> normal run: find new Returned jobs in the last
                             SINCE_DAYS days, email a summary, update state.
@@ -33,23 +32,15 @@ from graph_mailer import send_mail
 
 STATE_PATH = Path(__file__).parent / "data" / "seen_orders.json"
 
-# --- candidate key resolution -------------------------------------------------
-# Confirmed keys go first. Once DEBUG_ORDER_ID output confirms the real names
-# for Notes / Comments / TJET ha / product Total, trim these lists down.
-
 KEY_CANDIDATES = {
-    "orchard": ["customer_name", "Customer", "customer", "CustomerName", "Address"],
+    "orchard": ["customer_full_name", "customer_name", "Customer", "customer", "Address"],
     "kpin": ["KPIN", "kpin"],
-    "notes": ["Notes", "notes"],
-    "comments": ["Comments", "comments"],
-    "requested_area": ["requested_area", "RequestedArea", "area", "gross_coverage_area"],
+    "notes": ["notes", "Notes"],
+    "comments": ["comments", "Comments"],
+    "requested_area": ["gross_coverage_area", "requested_area", "area"],
     "l_per_ha": ["water_rate", "WaterRate"],
-    "litres": ["Litres", "litres"],
-    "tjet_ha": ["TJET", "TjetHa", "tjet_ha", "TJETha", "TJET_ha"],
-    "date": ["end_date", "EndDate", "due_date", "DueDate"],
+    "tjet_ha": ["TJET ha", "TJET", "tjet_ha"],
 }
-
-PRODUCT_UNIT_CANDIDATES = ["rate_unit", "unit", "uom", "measurement_unit", "product_unit"]
 
 
 def round_num(value, places=1) -> str:
@@ -69,8 +60,18 @@ def first_present(d: dict, keys: list, default=""):
     return default
 
 
-def extract_products(order_info: dict, area) -> list:
-    """Returns list of {name, rate, unit, total}."""
+def extract_products(order_info: dict) -> list:
+    """Returns list of {name, rate, unit, total, total_unit}.
+
+    Confirmed structure per product (from live order_products_json dump):
+      rate                          -> the /ha application rate (e.g. 700)
+      weight_unit                   -> unit for rate (e.g. "g", "ml")
+      requested_total                -> the job's target total product use -
+                                     matches the "Total" column on the Tabula
+                                     job sheet PDF exactly (NOT "total", which
+                                     is a separate in-progress applied figure)
+      requested_total_weight_units  -> unit for requested_total
+    """
     raw = order_info.get("order_products_json")
     if isinstance(raw, str):
         try:
@@ -80,26 +81,18 @@ def extract_products(order_info: dict, area) -> list:
     raw = raw or []
 
     products = []
-    try:
-        area_f = float(area) if area not in (None, "") else None
-    except (TypeError, ValueError):
-        area_f = None
-
     for p in raw:
-        name = to_text(p.get("product_label", "") or p.get("name", ""))
-        rate = p.get("rate", p.get("label_rate", ""))
-        unit = to_text(first_present(p, PRODUCT_UNIT_CANDIDATES))
-        total = p.get("total")
-        if total is None and area_f is not None:
-            try:
-                total = float(rate) * area_f
-            except (TypeError, ValueError):
-                total = ""
+        name = to_text(p.get("product_label", ""))
+        rate = p.get("rate", "")
+        unit = to_text(p.get("weight_unit", ""))
+        total = p.get("requested_total")
+        total_unit = to_text(p.get("requested_total_weight_units", "")) or unit
         products.append({
             "name": name,
             "rate": round_num(rate),
             "unit": unit,
             "total": round_num(total),
+            "total_unit": total_unit,
         })
     return products
 
@@ -117,8 +110,22 @@ def to_text(value) -> str:
     return str(value)
 
 
+def format_date(value) -> str:
+    """Handle both epoch (order_info) and pre-formatted (scheduling_entry) dates."""
+    if value in (None, ""):
+        return ""
+    try:
+        num = float(value)
+        if num > 10_000_000:  # looks like a real unix epoch
+            import datetime
+            return datetime.datetime.utcfromtimestamp(num).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        pass
+    return to_text(value)
+
+
 def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
-    merged = {**order_info}  # order_info takes priority for detail fields
+    merged = {**order_info}
     notes = to_text(first_present(merged, KEY_CANDIDATES["notes"]))
     comments = to_text(first_present(merged, KEY_CANDIDATES["comments"]))
     combined_notes = " | ".join(x for x in [notes, comments] if x)
@@ -126,23 +133,32 @@ def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
     raw_area = first_present(merged, KEY_CANDIDATES["requested_area"])
     area = round_num(raw_area)
 
+    water_rate = merged.get("water_rate")
+    litres = ""
+    try:
+        if water_rate not in (None, "") and raw_area not in (None, ""):
+            litres = round_num(float(water_rate) * float(raw_area))
+    except (TypeError, ValueError):
+        litres = ""
+
+    date = to_text(scheduling_entry.get("end_date")) or format_date(
+        merged.get("due_date") or merged.get("job_last_returned")
+    )
+
     return {
         "order_id": scheduling_entry.get("order_id") or merged.get("order_id"),
         "orchard": to_text(
-            first_present(scheduling_entry, KEY_CANDIDATES["orchard"])
-            or first_present(merged, KEY_CANDIDATES["orchard"])
+            first_present(merged, KEY_CANDIDATES["orchard"])
+            or first_present(scheduling_entry, KEY_CANDIDATES["orchard"])
         ),
         "kpin": to_text(first_present(merged, KEY_CANDIDATES["kpin"])),
         "notes": combined_notes,
         "requested_area": area,
         "l_per_ha": round_num(first_present(merged, KEY_CANDIDATES["l_per_ha"])),
-        "litres": round_num(first_present(merged, KEY_CANDIDATES["litres"])),
+        "litres": litres,
         "tjet_ha": round_num(first_present(merged, KEY_CANDIDATES["tjet_ha"])),
-        "date": to_text(
-            first_present(scheduling_entry, KEY_CANDIDATES["date"])
-            or first_present(merged, KEY_CANDIDATES["date"])
-        ),
-        "products": extract_products(merged, raw_area),
+        "date": date,
+        "products": extract_products(merged),
     }
 
 
@@ -162,7 +178,7 @@ def render_email(jobs: list) -> str:
     for j in jobs:
         product_lines = "".join(
             f"<li>{p['name']} — {p['rate']}{(' ' + p['unit']) if p['unit'] else ''}/ha, "
-            f"total {p['total']}{(' ' + p['unit']) if p['unit'] else ''}</li>"
+            f"total {p['total']}{(' ' + p['total_unit']) if p['total_unit'] else ''}</li>"
             for p in j["products"]
         ) or "<li>(no products recorded)</li>"
 
@@ -170,9 +186,7 @@ def render_email(jobs: list) -> str:
             high_rate = float(j["l_per_ha"]) >= 1500
         except (TypeError, ValueError):
             high_rate = False
-        l_per_ha_style = (
-            "color:#c0392b;font-weight:bold;" if high_rate else ""
-        )
+        l_per_ha_style = "color:#c0392b;font-weight:bold;" if high_rate else ""
 
         rows.append(f"""
         <div style="margin-bottom:24px;padding:16px;border:1px solid #ddd;border-radius:6px;">
