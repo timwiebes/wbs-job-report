@@ -10,6 +10,12 @@ Two modes, selected by env var:
   DEBUG_ORDER_ID=<id>   -> just fetch and print the raw order_infos JSON for
                             that one order (pretty-printed, all keys visible)
                             to the Actions log. No email sent, no state written.
+                            Use this once to confirm field names, then unset it.
+
+  TEST_ORDER_IDS=<ids>  -> comma-separated order_ids to force-email right now,
+                            regardless of whether they're already in
+                            seen_orders.json. Does NOT update seen_orders.json -
+                            safe to re-run repeatedly while checking formatting.
 
   (default)             -> normal run: find new Returned jobs in the last
                             SINCE_DAYS days, email a summary, update state.
@@ -116,7 +122,7 @@ def format_date(value) -> str:
         return ""
     try:
         num = float(value)
-        if num > 10_000_000:  # looks like a real unix epoch
+        if num > 10_000_000:
             import datetime
             return datetime.datetime.utcfromtimestamp(num).strftime("%Y-%m-%d")
     except (TypeError, ValueError):
@@ -223,6 +229,20 @@ def main():
         info = client.get_order_info(debug_order_id)
         print(f"--- order_infos keys for order {debug_order_id} ---")
         print(json.dumps(info, indent=2, default=str))
+        sys.exit(0)
+
+    test_order_ids = os.environ.get("TEST_ORDER_IDS", "").strip()
+    if test_order_ids:
+        ids = [x.strip() for x in test_order_ids.split(",") if x.strip()]
+        all_jobs = {str(j.get("order_id")): j for j in client.get_all_jobs()}
+        summaries = []
+        for oid in ids:
+            scheduling_entry = all_jobs.get(oid, {"order_id": oid})
+            info = client.get_order_info(oid)
+            summaries.append(summarise_job(info, scheduling_entry))
+        html = render_email(summaries)
+        send_mail(mail_to, f"WBS TEST: {len(summaries)} job(s)", html)
+        print(f"[TEST] Emailed {len(summaries)} job(s) to {mail_to}. seen_orders.json NOT updated.")
         sys.exit(0)
 
     seen = load_seen()
