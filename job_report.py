@@ -137,7 +137,7 @@ def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
     combined_notes = " | ".join(x for x in [notes, comments] if x)
 
     raw_area = first_present(merged, KEY_CANDIDATES["requested_area"])
-    area = round_num(raw_area)
+    area = round_num(raw_area, places=2)
 
     water_rate = merged.get("water_rate")
     litres = ""
@@ -162,7 +162,7 @@ def summarise_job(order_info: dict, scheduling_entry: dict) -> dict:
         "requested_area": area,
         "l_per_ha": round_num(first_present(merged, KEY_CANDIDATES["l_per_ha"])),
         "litres": litres,
-        "tjet_ha": round_num(first_present(merged, KEY_CANDIDATES["tjet_ha"])),
+        "tjet_ha": round_num(first_present(merged, KEY_CANDIDATES["tjet_ha"]), places=2),
         "date": date,
         "products": extract_products(merged),
     }
